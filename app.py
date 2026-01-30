@@ -4,9 +4,10 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# --- 1. 網頁設定 ---
-st.set_page_config(page_title="VIP SMC 機構透視系統 V10.0", layout="wide")
+# --- 1. 網頁設定 (必須在第一行) ---
+st.set_page_config(page_title="VIP 雙核戰略系統 V11.0", layout="wide")
 
 # --- 2. 密碼鎖 ---
 def check_password():
@@ -14,8 +15,8 @@ def check_password():
         st.session_state.password_correct = False
     
     if not st.session_state.password_correct:
-        st.markdown("## 🔒 VIP SMC 機構透視系統 V10.0")
-        st.caption("核心技術：Smart Money Concepts (SMC) + Fair Value Gaps (FVG)")
+        st.markdown("## 🔒 VIP 雙核戰略系統 V11.0")
+        st.caption("雙視角切換：🚀 智能戰術 (V9)  |  🏛️ 機構透視 (V10)")
         password = st.text_input("請輸入通行密碼", type="password")
         if st.button("登入"):
             if password == "VIP888":
@@ -28,228 +29,244 @@ def check_password():
 check_password()
 
 # --- 側邊欄 ---
-st.sidebar.title("🏛️ 機構操盤室")
+st.sidebar.title("🎛️ 雙核控制台")
 symbol = st.sidebar.text_input("輸入美股代號", value="NVDA").upper()
 st.sidebar.markdown("---")
-st.sidebar.success("""
-**SMC 機構指標說明：**
-1. 🔲 **FVG (失衡區)**：
-   價格劇烈波動留下的缺口，
-   價格常會回測此區(磁鐵效應)。
+st.sidebar.info("""
+**系統導航：**
+點擊主畫面在上方的標籤頁 (Tabs) 切換視角。
+
+1. **🚀 智能戰術**：
+   適合短線進出，看 K 線形態與指標。
    
-2. 🧱 **Order Block (訂單塊)**：
-   機構大舉進場的足跡，
-   這是最強的支撐/壓力區。
-
-3. 🌊 **Liquidity (流動性)**：
-   標記前高/前低，
-   是假突破的高發區。
+2. **🏛️ 機構透視**：
+   適合尋找大支撐，看 FVG 缺口與訂單塊。
 """)
-show_fvg = st.sidebar.checkbox("顯示 FVG 失衡區", value=True)
-show_ob = st.sidebar.checkbox("顯示 Order Blocks 訂單塊", value=True)
 
-# --- 3. 核心數據處理 ---
+# --- 3. 核心數據引擎 (一次計算所有指標) ---
+@st.cache_data(ttl=3600) # 快取數據避免重複加載
 def get_data(ticker):
     try:
-        # 下載 1 年數據
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        df = yf.download(ticker, period="2y", progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # 基礎指標
-        df['EMA_50'] = ta.ema(df['Close'], length=50) # 趨勢基準
+        # --- V9 指標 (趨勢與動能) ---
+        df['EMA_20'] = ta.ema(df['Close'], length=20)
+        df['EMA_50'] = ta.ema(df['Close'], length=50)
+        df['EMA_150'] = ta.ema(df['Close'], length=150)
+        df['EMA_200'] = ta.ema(df['Close'], length=200)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         df['RSI'] = ta.rsi(df['Close'], length=14)
         
-        # SuperTrend (用於過濾大方向)
+        # SuperTrend
         st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=10, multiplier=3)
         st_col = [c for c in st_data.columns if "SUPERT_" in c][0]
         st_dir = [c for c in st_data.columns if "SUPERTd_" in c][0]
         df['SuperTrend'] = st_data[st_col]
-        df['Trend_Dir'] = st_data[st_dir] # 1=Buy, -1=Sell
+        df['Trend_Dir'] = st_data[st_dir]
+        
+        # WaveTrend (反轉)
+        tp = (df['High'] + df['Low'] + df['Close']) / 3
+        esa = ta.ema(tp, length=10)
+        d = ta.ema((tp - esa).abs(), length=10)
+        ci = (tp - esa) / (0.015 * d)
+        df['WT1'] = ta.ema(ci, length=21)
+        df['WT2'] = ta.sma(df['WT1'], length=4)
+        
+        # ADX (強度)
+        adx = ta.adx(df['High'], df['Low'], df['Close'])
+        df['ADX'] = adx['ADX_14']
+        
+        # Volume Ratio
+        df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
+        df['Vol_Ratio'] = df['Volume'] / df['Vol_SMA']
 
+        # K線實體計算
+        df['Body'] = abs(df['Close'] - df['Open'])
+        
         df.dropna(inplace=True)
         return df
     except:
         return None
 
-# --- 4. SMC 機構指標算法 (V10 核心) ---
-
-def calculate_smc(df):
-    # FVG (Fair Value Gaps) 識別
-    # 邏輯：第1根K線的高/低點 與 第3根K線的低/高點 之間沒有重疊
+# --- 4. 功能模組：V9 戰術信號 (V8+V9 邏輯) ---
+def detect_retail_signals(df):
+    signals = []
+    # 取最近 100 天
+    start = max(0, len(df)-100)
+    avg_body = df['Body'].rolling(20).mean()
     
-    fvg_zones = []
-    
-    for i in range(2, len(df)):
-        # 1. 看漲 FVG (Bullish FVG)
-        # 條件：K線1的高點 < K線3的低點 (中間K線2是大陽線)
-        h1 = df['High'].iloc[i-2]
-        l3 = df['Low'].iloc[i]
+    for i in range(start, len(df)):
+        curr = df.iloc[i]; prev = df.iloc[i-1]; date = df.index[i]
         
-        if l3 > h1 and df['Close'].iloc[i-1] > df['Open'].iloc[i-1]:
-            # 記錄這個區域 (只記錄最近 30 天的，保持圖表乾淨)
-            if i > len(df) - 60: 
-                fvg_zones.append({
-                    "type": "Bull_FVG",
-                    "top": l3,
-                    "bottom": h1,
-                    "start_date": df.index[i-1],
-                    "end_date": df.index[-1] # 延伸到今天
-                })
-        
-        # 2. 看跌 FVG (Bearish FVG)
-        # 條件：K線1的低點 > K線3的高點 (中間K線2是大陰線)
-        l1 = df['Low'].iloc[i-2]
-        h3 = df['High'].iloc[i]
-        
-        if h3 < l1 and df['Close'].iloc[i-1] < df['Open'].iloc[i-1]:
-            if i > len(df) - 60:
-                fvg_zones.append({
-                    "type": "Bear_FVG",
-                    "top": l1,
-                    "bottom": h3,
-                    "start_date": df.index[i-1],
-                    "end_date": df.index[-1]
-                })
+        # 1. 爆量
+        if curr['Vol_Ratio'] >= 2.0:
+            signals.append({"date": date, "price": curr['High'], "text": "🔥VH", "color": "red", "ay": -40})
+            
+        # 2. 吞沒
+        if curr['Close'] > curr['Open'] and prev['Close'] < prev['Open']:
+            if curr['Close'] > prev['Open'] and curr['Open'] < prev['Close']:
+                signals.append({"date": date, "price": curr['Low'], "text": "🐂吞沒", "color": "green", "ay": 40})
+                
+        # 3. WaveTrend 鑽石
+        if curr['WT1'] < -50 and curr['WT1'] > curr['WT2'] and prev['WT1'] <= prev['WT2']:
+            signals.append({"date": date, "price": curr['Low'] - curr['ATR'], "text": "💎", "color": "cyan", "ay": 25})
+            
+    return signals
 
-    return fvg_zones
-
-def detect_order_blocks(df):
-    # 簡易 Order Block 識別：
-    # 看漲 OB：一段下跌趨勢後的最後一根陰線，隨後被強勢陽線吞沒
-    obs = []
-    for i in range(5, len(df)-2):
-        # 簡單邏輯：如果是波段低點，且後面緊跟大陽線
-        # 為了代碼效率，我們找 Pivot Low
-        curr_low = df['Low'].iloc[i]
-        if curr_low < df['Low'].iloc[i-1] and curr_low < df['Low'].iloc[i+1]:
-            # 這是個轉折底，檢查這根是否是陰線，且後面是否大漲
-            if df['Close'].iloc[i] < df['Open'].iloc[i]: # 陰線
-                # 檢查後兩天是否有大漲吞沒
-                if df['Close'].iloc[i+1] > df['High'].iloc[i] or df['Close'].iloc[i+2] > df['High'].iloc[i]:
-                     # 這根陰線就是 Order Block
-                     if i > len(df) - 60:
-                        obs.append({
-                            "type": "Bull_OB",
-                            "top": df['High'].iloc[i],
-                            "bottom": df['Low'].iloc[i],
-                            "date": df.index[i]
-                        })
-    return obs
-
-# --- 5. 訊號整合 ---
-def generate_institutional_signal(df):
+def generate_v9_panel(df):
     last = df.iloc[-1]
-    
-    # 結合 趨勢 (SuperTrend) + 價格行為
-    trend = "🟢 多頭機構控盤" if last['Trend_Dir'] == 1 else "🔴 空頭機構控盤"
-    
-    score = 0
-    reasons = []
-    
-    # 1. 趨勢分
-    if last['Trend_Dir'] == 1: 
-        score += 2
-        reasons.append("✅ **趨勢**：SuperTrend 顯示機構資金流向為多頭。")
-    else: 
-        score -= 2
-        reasons.append("⚠️ **趨勢**：SuperTrend 顯示空頭佔優。")
-        
-    # 2. RSI 狀態
-    if last['RSI'] > 70: reasons.append("⚠️ **RSI**：超買，小心機構倒貨。")
-    if last['RSI'] < 30: reasons.append("✅ **RSI**：超賣，機構可能正在吸籌。")
+    trend = "🟢 多頭趨勢" if last['Trend_Dir'] == 1 else "🔴 空頭趨勢"
+    strength = "🔥 強勢" if last['ADX'] > 25 else "☁️ 震盪"
+    stop = last['SuperTrend']
+    return trend, strength, stop
 
-    # 3. 建議操作
-    atr = last['ATR']
-    stop_loss = last['SuperTrend']
+# --- 5. 功能模組：V10 機構邏輯 (SMC) ---
+def calculate_smc_zones(df):
+    fvgs = []
+    obs = []
     
-    # 計算盈虧比
-    dist_to_sl = abs(last['Close'] - stop_loss)
-    tp1 = last['Close'] + (1.5 * dist_to_sl) if last['Trend_Dir'] == 1 else last['Close'] - (1.5 * dist_to_sl)
-    
-    return trend, score, reasons, stop_loss, tp1
+    # 計算 FVG (只取最近 60 天)
+    start = max(0, len(df)-60)
+    for i in range(start, len(df)):
+        # Bullish FVG
+        if df['Low'].iloc[i] > df['High'].iloc[i-2] and df['Close'].iloc[i-1] > df['Open'].iloc[i-1]:
+            fvgs.append({
+                "type": "Bull", "top": df['Low'].iloc[i], "bottom": df['High'].iloc[i-2],
+                "x0": df.index[i-1], "x1": df.index[-1]
+            })
+        # Bearish FVG
+        if df['High'].iloc[i] < df['Low'].iloc[i-2] and df['Close'].iloc[i-1] < df['Open'].iloc[i-1]:
+            fvgs.append({
+                "type": "Bear", "top": df['Low'].iloc[i-2], "bottom": df['High'].iloc[i],
+                "x0": df.index[i-1], "x1": df.index[-1]
+            })
+            
+    # 計算簡易 Order Blocks (最近 90 天)
+    # 邏輯：波段低點前的陰線
+    for i in range(start, len(df)-2):
+        if df['Low'].iloc[i] < df['Low'].iloc[i-1] and df['Low'].iloc[i] < df['Low'].iloc[i+1]: # 轉折底
+            if df['Close'].iloc[i] < df['Open'].iloc[i]: # 陰線
+                # 確認後續上漲
+                if df['Close'].iloc[i+1] > df['High'].iloc[i] or df['Close'].iloc[i+2] > df['High'].iloc[i]:
+                    obs.append({
+                        "type": "OB", "top": df['High'].iloc[i], "bottom": df['Low'].iloc[i],
+                        "x0": df.index[i], "x1": df.index[-1]
+                    })
+    return fvgs, obs
 
-# --- 主 UI ---
-st.title(f"🏛️ {symbol} SMC 機構透視系統 V10.0")
-st.caption("Smart Money Concepts: 追蹤大戶足跡，尋找 FVG 缺口與訂單塊")
-
+# --- 主程式 ---
+st.title(f"📊 {symbol} 雙核戰略分析系統")
 df = get_data(symbol)
 
 if df is not None:
-    # 計算 SMC 數據
-    fvgs = calculate_smc(df)
-    obs = detect_order_blocks(df)
-    trend, score, reasons, sl, tp = generate_institutional_signal(df)
-    last_price = df['Close'].iloc[-1]
     
-    # --- 1. 機構儀表板 ---
-    st.subheader("📊 機構資金流向 (Institutional Flow)")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("當前趨勢", trend)
-    c2.metric("最新報價", f"${last_price:.2f}")
-    c3.metric("止損位 (SL)", f"${sl:.2f}")
-    c4.metric("第一目標 (TP)", f"${tp:.2f}")
+    # 建立兩個分頁 (Tabs)
+    tab_retail, tab_inst = st.tabs(["🚀 智能戰術 (V9.0)", "🏛️ 機構透視 (V10.0)"])
     
-    with st.expander("📝 查看詳細分析報告", expanded=True):
-        for r in reasons:
-            st.write(r)
-        st.info("💡 **交易提示**：重點關注圖表中的 **矩形色塊 (FVG)**。當價格回調進入綠色 FVG 區域且不跌破時，是勝率最高的「機構搭車點」。")
+    # ==========================================
+    # 分頁 1: V9.0 智能戰術 (適合散戶/短線)
+    # ==========================================
+    with tab_retail:
+        st.subheader("🚀 趨勢跟蹤與形態識別")
+        
+        # 1. 戰術面板
+        trend, strength, stop_v9 = generate_v9_panel(df)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("市場趨勢", trend)
+        c2.metric("趨勢強度 (ADX)", f"{df['ADX'].iloc[-1]:.1f}", strength)
+        c3.metric("WaveTrend 動能", f"{df['WT1'].iloc[-1]:.1f}")
+        c4.metric("智能止損 (SuperTrend)", f"${stop_v9:.2f}")
+        
+        # 2. V9 圖表 (包含雲帶、SuperTrend、形態)
+        fig_v9 = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+        
+        # K線
+        fig_v9.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
+        
+        # 趨勢雲 (150/200 EMA)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_150'], line=dict(width=1, color='rgba(0,128,0,0.5)'), name="EMA 150"), row=1, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(width=1, color='rgba(128,0,0,0.5)'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)', name="EMA 200 (雲)"), row=1, col=1)
+        
+        # SuperTrend
+        st_color = ['green' if x == 1 else 'red' for x in df['Trend_Dir']]
+        # 為了畫線連續，這裡簡化處理，直接畫出整條線，顏色分段較複雜，用點表示或單色
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['SuperTrend'], mode='lines', line=dict(color='orange', width=2, dash='dash'), name="SuperTrend止損"), row=1, col=1)
 
-    st.divider()
+        # 標註 (VH, 吞沒, 鑽石)
+        signals = detect_retail_signals(df)
+        annotations_v9 = []
+        for s in signals:
+            annotations_v9.append(dict(
+                x=s['date'], y=s['price'], xref="x", yref="y",
+                text=s['text'], showarrow=True, arrowhead=2, ax=0, ay=s['ay'],
+                font=dict(color=s['color'], size=10, family="Arial Black")
+            ))
+        
+        # WaveTrend 副圖
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['WT1'], line=dict(color='cyan'), name="WT 快線"), row=2, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['WT2'], line=dict(color='red', dash='dot'), name="WT 慢線"), row=2, col=1)
+        fig_v9.add_hline(y=60, line_dash="dot", row=2, col=1); fig_v9.add_hline(y=-60, line_dash="dot", row=2, col=1)
 
-    # --- 2. SMC 專業圖表 ---
-    st.subheader(f"🏛️ {symbol} 機構訂單分佈圖")
-    
-    fig = go.Figure()
+        fig_v9.update_layout(height=700, xaxis_rangeslider_visible=False, title=f"{symbol} 智能戰術圖表 (V9)", annotations=annotations_v9, template="plotly_dark")
+        st.plotly_chart(fig_v9, use_container_width=True)
+        
+        st.info("💡 **V9 戰術提示**：尋找「WaveTrend 鑽石信號」與「SuperTrend 趨勢線」同向的時刻。背景雲帶為綠色時，只做多。")
 
-    # K線
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"))
-    
-    # SuperTrend 線
-    st_color = 'green' if df['Trend_Dir'].iloc[-1] == 1 else 'red'
-    fig.add_trace(go.Scatter(x=df.index, y=df['SuperTrend'], line=dict(color=st_color, width=2), name="SuperTrend (止損)"))
-
-    # --- 繪製 FVG (失衡區) ---
-    if show_fvg:
+    # ==========================================
+    # 分頁 2: V10.0 機構透視 (適合大戶/波段)
+    # ==========================================
+    with tab_inst:
+        st.subheader("🏛️ 機構訂單流與結構")
+        
+        # 1. 機構面板
+        fvgs, obs = calculate_smc_zones(df)
+        last_close = df['Close'].iloc[-1]
+        
+        # 判斷價格與 FVG 的關係
+        fvg_status = "價格處於平衡區"
         for box in fvgs:
-            # 限制只畫尚未被填補太遠的，或者最近的
-            color = "rgba(0, 255, 0, 0.2)" if box['type'] == "Bull_FVG" else "rgba(255, 0, 0, 0.2)"
-            # 使用 Shape 畫矩形
-            fig.add_shape(type="rect",
-                x0=box['start_date'], y0=box['bottom'],
-                x1=box['end_date'], y1=box['top'],
-                line=dict(width=0),
-                fillcolor=color,
-                layer="below"
-            )
-            # 標註
-            if box == fvgs[-1]: # 只標最後一個，避免亂
-                fig.add_annotation(x=box['start_date'], y=box['top'], text="FVG", showarrow=False, font=dict(color=color, size=8))
+            if box['type'] == 'Bull' and box['bottom'] <= last_close <= box['top']:
+                fvg_status = "⚠️ 價格進入看漲 FVG (潛在支撐)"
+            elif box['type'] == 'Bear' and box['bottom'] <= last_close <= box['top']:
+                fvg_status = "⚠️ 價格進入看跌 FVG (潛在壓力)"
 
-    # --- 繪製 Order Blocks (訂單塊) ---
-    if show_ob:
+        ic1, ic2 = st.columns(2)
+        ic1.metric("機構狀態監測", fvg_status)
+        ic2.metric("下方最近訂單塊", f"{len(obs)} 個潛在支撐區")
+        
+        # 2. V10 圖表 (乾淨版，只有 FVG 和 OB)
+        fig_v10 = go.Figure()
+        
+        # K線 (單純化)
+        fig_v10.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"))
+        
+        # 繪製 FVG (矩形)
+        for box in fvgs:
+            color = "rgba(0, 255, 0, 0.2)" if box['type'] == 'Bull' else "rgba(255, 0, 0, 0.2)"
+            fig_v10.add_shape(type="rect", x0=box['x0'], y0=box['bottom'], x1=box['x1'], y1=box['top'],
+                             line=dict(width=0), fillcolor=color, layer="below")
+                             
+        # 繪製 Order Blocks (藍色矩形)
         for ob in obs:
-            # OB 通常是一根 K 線的範圍，延伸到未來
-            fig.add_shape(type="rect",
-                x0=ob['date'], y0=ob['bottom'],
-                x1=df.index[-1], y1=ob['top'],
-                line=dict(color="blue", width=1, dash="dot"),
-                fillcolor="rgba(0, 0, 255, 0.1)",
-                layer="below"
-            )
-
-    fig.update_layout(
-        height=750,
-        xaxis_rangeslider_visible=False,
-        title=f"{symbol} Smart Money Structure (FVG & Order Blocks)",
-        template="plotly_dark",
-        yaxis_title="Price"
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    st.warning("**免責聲明**：SMC (聰明錢概念) 是進階交易技術，FVG 區域是潛在支撐/壓力，並非絕對轉折點，請務必配合止損使用。")
+            fig_v10.add_shape(type="rect", x0=ob['x0'], y0=ob['bottom'], x1=ob['x1'], y1=ob['top'],
+                             line=dict(color="blue", width=1, dash="dot"), fillcolor="rgba(0, 0, 255, 0.15)", layer="below")
+            
+        fig_v10.update_layout(height=700, xaxis_rangeslider_visible=False, title=f"{symbol} SMC 機構透視圖 (V10)", template="plotly_dark")
+        
+        # 添加標註解釋
+        fig_v10.add_annotation(text="綠色區塊 = FVG (缺口回補支撐)", xref="paper", yref="paper", x=0, y=1, showarrow=False, font=dict(color="green"))
+        fig_v10.add_annotation(text="藍色區塊 = Order Block (大戶成本)", xref="paper", yref="paper", x=0, y=0.95, showarrow=False, font=dict(color="blue"))
+        
+        st.plotly_chart(fig_v10, use_container_width=True)
+        
+        st.success("""
+        **🏛️ 機構劇本解讀：**
+        1. **FVG (綠色/紅色塊)**：這是價格的「磁鐵」。如果價格急速回調並停留在綠色區塊內，這是機構在二次上車。
+        2. **Order Block (藍色塊)**：這是最後的防線。價格碰到這裡通常會有強烈反彈。
+        **操作建議**：不要在 FVG 中間追單，等待價格觸碰這些色塊邊緣並出現反轉 K 線（如 V9 的錘頭）時進場。
+        """)
 
 else:
-    st.error("無法獲取數據")
+    st.error("無法獲取數據，請檢查代號。")

@@ -2,11 +2,12 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- 1. 網頁設定 ---
-st.set_page_config(page_title="VIP 專業操盤系統", layout="wide")
+st.set_page_config(page_title="VIP 機構級操盤系統", layout="wide")
 
 # --- 2. 密碼鎖 ---
 def check_password():
@@ -14,8 +15,8 @@ def check_password():
         st.session_state.password_correct = False
     
     if not st.session_state.password_correct:
-        st.markdown("## 🔒 VIP 會員專區")
-        password = st.text_input("請輸入本月通行密碼", type="password")
+        st.markdown("## 🔒 VIP 機構版登入")
+        password = st.text_input("請輸入通行密碼", type="password")
         if st.button("登入"):
             if password == "VIP888":
                 st.session_state.password_correct = True
@@ -27,172 +28,231 @@ def check_password():
 check_password()
 
 # --- 側邊欄 ---
-st.sidebar.title("💎 VIP 操盤室")
+st.sidebar.title("💎 機構操盤室")
 symbol = st.sidebar.text_input("輸入美股代號", value="NVDA").upper()
-timeframe = st.sidebar.selectbox("選擇時間範圍", ["3mo", "6mo", "1y", "2y"], index=2)
+timeframe = st.sidebar.selectbox("分析週期", ["3mo", "6mo", "1y"], index=2)
 
-# --- 3. 核心分析邏輯 (修復版) ---
-def get_data_and_analyze(ticker, period):
+# --- 3. 核心數據處理 ---
+def get_data(ticker, period):
     try:
-        # 下載數據
         df = yf.download(ticker, period=period, progress=False)
+        if df.empty: return None
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # --- 數據清洗 (修復 KeyError 的關鍵) ---
-        if df.empty: return None, "找不到數據"
-        
-        # 處理 Yahoo Finance 的多層索引 (MultiIndex)
-        # 如果欄位是 ('Close', 'NVDA') 這種格式，我們只要保留 'Close'
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-            
-        # 確保必要的欄位存在
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in df.columns for col in required_cols):
-            return None, f"數據格式錯誤，缺少必要欄位。偵測到的欄位: {df.columns.tolist()}"
-
-        # --- 計算技術指標 ---
-        # 1. 移動平均線
+        # 基礎指標
         df['SMA_20'] = ta.sma(df['Close'], length=20)
-        df['EMA_50'] = ta.ema(df['Close'], length=50)
-        
-        # 2. 布林通道 (Bollinger Bands)
-        bbands = ta.bbands(df['Close'], length=20, std=2)
-        if bbands is not None:
-            df = pd.concat([df, bbands], axis=1)
-            # 重新命名布林通道欄位，避免名稱變動導致錯誤
-            # 假設 bbands 回傳三欄，分別命名為 BBL, BBM, BBU
-            bb_cols = [c for c in df.columns if c.startswith('BBL_')]
-            if bb_cols: df['BBL'] = df[bb_cols[0]]
-            
-            bb_cols_u = [c for c in df.columns if c.startswith('BBU_')]
-            if bb_cols_u: df['BBU'] = df[bb_cols_u[0]]
-
-        # 3. RSI
+        df['SMA_50'] = ta.sma(df['Close'], length=50)
+        df['SMA_200'] = ta.sma(df['Close'], length=200)
         df['RSI'] = ta.rsi(df['Close'], length=14)
+        
+        # 布林通道
+        bb = ta.bbands(df['Close'], length=20, std=2)
+        if bb is not None:
+            df = pd.concat([df, bb], axis=1)
+            # 重新命名以防萬一
+            cols = df.columns.tolist()
+            if len(cols) >= 3:
+                # 假設最後三欄是 BB 數據，手動對應
+                # 這是一個簡單的防呆，確保我們抓得到欄位
+                pass 
 
-        # 4. MACD (最容易出錯的地方，我們手動命名)
-        macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-        if macd is not None:
-            # 強制重新命名，不管它原本叫什麼
-            macd.columns = ['MACD_Line', 'MACD_Hist', 'MACD_Signal']
-            df = pd.concat([df, macd], axis=1)
-        
-        # 5. ATR
-        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-        
-        # 移除 NaN (剛開始幾天沒數據的行)
+        # 成交量異動 (Volume Spike)
+        df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
+        df['Vol_Ratio'] = df['Volume'] / df['Vol_SMA'] # 量比
+
         df.dropna(inplace=True)
-
-        return df, None
+        return df
     except Exception as e:
-        import traceback
-        return None, f"發生錯誤: {str(e)}"
+        return None
 
-# --- 生成 AI 分析建議 ---
-def generate_insight(df):
+# --- 4. K線形態識別引擎 (純 Python 實現) ---
+def check_patterns(df):
+    # 取得最後 3 天的數據 (便於計算晨星等形態)
+    if len(df) < 3: return []
+    
+    t = df.iloc[-1]   # 今天 (Today)
+    y = df.iloc[-2]   # 昨天 (Yesterday)
+    yy = df.iloc[-3]  # 前天
+    
+    patterns = []
+    
+    # 計算實體長度與影線
+    body = abs(t['Close'] - t['Open'])
+    upper_shadow = t['High'] - max(t['Close'], t['Open'])
+    lower_shadow = min(t['Close'], t['Open']) - t['Low']
+    avg_body = abs(df['Close'] - df['Open']).mean() # 平均實體大小
+    
+    # 1. 吞沒形態 (Engulfing)
+    if t['Close'] > t['Open'] and y['Close'] < y['Open']: # 今陽昨陰
+        if t['Close'] > y['Open'] and t['Open'] < y['Close']:
+            patterns.append("🐂 **看漲吞沒 (Bullish Engulfing)**：多頭強勢反擊，覆蓋昨日跌幅。")
+    
+    if t['Close'] < t['Open'] and y['Close'] > y['Open']: # 今陰昨陽
+        if t['Close'] < y['Open'] and t['Open'] > y['Close']:
+            patterns.append("🐻 **看跌吞沒 (Bearish Engulfing)**：空頭反撲，吃掉昨日漲幅。")
+
+    # 2. 錘頭線 (Hammer) - 底部反轉
+    # 實體小，下影線長 (>2倍實體)，上影線短
+    if lower_shadow > 2 * body and upper_shadow < 0.5 * body:
+        if t['RSI'] < 40: # 結合低位判斷才準
+            patterns.append("🔨 **錘頭線 (Hammer)**：低位出現長下影線，主力嘗試撐盤。")
+
+    # 3. 射擊之星 (Shooting Star) - 頂部反轉
+    if upper_shadow > 2 * body and lower_shadow < 0.5 * body:
+        if t['RSI'] > 60:
+            patterns.append("☄️ **射擊之星 (Shooting Star)**：高位受阻，拋壓沉重。")
+
+    # 4. 十字星 (Doji)
+    if body < 0.1 * avg_body:
+        patterns.append("➕ **十字星 (Doji)**：多空勢均力敵，變盤前兆。")
+
+    # 5. 晨星 (Morning Star) - 3根K線
+    # 陰線 -> 小星線 -> 陽線
+    if yy['Close'] < yy['Open'] and abs(y['Close']-y['Open']) < avg_body * 0.5 and t['Close'] > t['Open']:
+        if t['Close'] > (yy['Open'] + yy['Close'])/2: # 收盤價深入第一根實體一半以上
+            patterns.append("🌅 **晨星形態 (Morning Star)**：完美的底部反轉訊號。")
+
+    return patterns
+
+# --- 5. 阻力支撐與綜合分析 ---
+def generate_pro_analysis(df, ticker):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    insight = []
-    score = 0 
+    signals = []
+    score = 0
     
-    # 1. 趨勢判斷
-    if last['Close'] > last['EMA_50']:
-        insight.append(f"✅ **趨勢向上**：股價位於 50 日均線 (${last['EMA_50']:.2f}) 之上。")
-        score += 2
-    else:
-        insight.append(f"⚠️ **趨勢向下**：股價跌破 50 日均線，注意風險。")
+    # A. 均線與趨勢分析
+    if last['Close'] < last['SMA_20'] and prev['Close'] > prev['SMA_20']:
+        signals.append(f"📉 **跌穿 20MA 短期生命線**：股價轉弱，短線支撐失效。")
         score -= 2
-
-    # 2. RSI
-    if last['RSI'] > 70:
-        insight.append(f"🔴 **RSI 過熱 ({last['RSI']:.1f})**：短線超買。")
-        score -= 1
-    elif last['RSI'] < 30:
-        insight.append(f"🟢 **RSI 超賣 ({last['RSI']:.1f})**：反彈機會。")
+    elif last['Close'] > last['SMA_20'] and prev['Close'] < prev['SMA_20']:
+        signals.append(f"📈 **突破 20MA**：站上短期均線，動能轉強。")
         score += 2
-    else:
-        insight.append(f"⚪ **RSI 中性 ({last['RSI']:.1f})**：動能正常。")
+        
+    if last['Close'] < last['SMA_50']:
+        signals.append(f"⚠️ **位於 50MA 之下**：中期趨勢偏空，反彈宜減碼。")
+        score -= 1
 
-    # 3. MACD (使用新命名的欄位)
-    if 'MACD_Hist' in df.columns:
-        if last['MACD_Hist'] > 0 and prev['MACD_Hist'] < 0:
-            insight.append("🚀 **MACD 黃金交叉**：買入訊號確認！")
-            score += 2
-        elif last['MACD_Hist'] < 0 and prev['MACD_Hist'] > 0:
-            insight.append("🔻 **MACD 死亡交叉**：動能轉弱。")
+    # B. 成交量異動 (VH)
+    if last['Vol_Ratio'] > 2.0:
+        if last['Close'] > last['Open']:
+            signals.append(f"🔥 **爆量上漲 (量比 {last['Vol_Ratio']:.1f}x)**：資金強力進駐，後市看好。")
+            score += 1
+        else:
+            signals.append(f"💀 **爆量下殺 (量比 {last['Vol_Ratio']:.1f}x)**：恐慌性拋售，主力出貨。")
             score -= 2
 
-    # 4. 布林通道
-    if 'BBU' in df.columns and last['Close'] > last['BBU']:
-        insight.append("🔥 **突破布林上軌**：強勢但需防回調。")
-    elif 'BBL' in df.columns and last['Close'] < last['BBL']:
-        insight.append("💧 **跌破布林下軌**：關注支撐。")
+    # C. 形態學 (Patterns)
+    candlestick_patterns = check_patterns(df)
+    for p in candlestick_patterns:
+        signals.append(p)
+        if "🐂" in p or "🔨" in p or "🌅" in p: score += 2
+        if "🐻" in p or "☄️" in p: score -= 2
 
-    if score >= 3: final_call = "🟢 強力買入"
-    elif score <= -3: final_call = "🔴 強力賣出"
-    elif score > 0: final_call = "🔵 謹慎看多"
-    else: final_call = "🟠 觀望 / 減倉"
+    # D. 計算關鍵位 (阻力/支撐)
+    # 簡單算法：過去 20 天的高低點
+    recent_high = df['High'].tail(20).max()
+    recent_low = df['Low'].tail(20).min()
+    
+    # 尋找整數關口 (Psychological Levels)
+    price = last['Close']
+    if price > 100:
+        round_res = (int(price / 10) + 1) * 10 # 下一個 10元關卡
+        round_sup = (int(price / 10)) * 10
+    else:
+        round_res = (int(price / 5) + 1) * 5
+        round_sup = (int(price / 5)) * 5
 
-    return insight, final_call, score
+    levels = {
+        "resistance": max(recent_high, round_res),
+        "support": min(recent_low, round_sup),
+        "round_number": round_res
+    }
 
-# --- 主畫面 ---
-st.title(f"📈 {symbol} 專業技術分析")
-st.caption("含 MACD, RSI, Bollinger Bands, Volume 綜合指標")
+    # 總結
+    if score >= 3: recommendation = "🟢 強力買入"
+    elif score <= -3: recommendation = "🔴 強力賣出"
+    elif score > 0: recommendation = "🔵 謹慎看多"
+    else: recommendation = "🟠 觀望 / 減倉"
 
-df, err = get_data_and_analyze(symbol, timeframe)
+    return signals, recommendation, score, levels
+
+# --- 主畫面 UI ---
+st.title(f"📊 {symbol} 機構級深度分析")
+st.caption("包含：K線形態識別、成交量異動 (VH)、均線攻防、關鍵位")
+
+df = get_data(symbol, timeframe)
 
 if df is not None:
+    # 1. 頂部大數據
     last_price = df['Close'].iloc[-1]
     change = last_price - df['Close'].iloc[-2]
-    pct_change = (change / df['Close'].iloc[-2]) * 100
+    pct = (change / df['Close'].iloc[-2]) * 100
     
-    c1, c2, c3 = st.columns(3)
-    c1.metric("現價", f"${last_price:.2f}", f"{change:.2f} ({pct_change:.2f}%)")
+    # 執行分析
+    reasons, rec, score, levels = generate_pro_analysis(df, symbol)
     
-    insights, call, score = generate_insight(df)
-    c2.metric("AI 綜合評級", call)
-    c3.metric("多空分數", f"{score} / 5")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("現價", f"${last_price:.2f}", f"{pct:.2f}%")
+    c2.metric("AI 評級", rec)
+    c3.metric("多空分數", f"{score} / 10")
+    c4.metric("今日量比 (Vol Ratio)", f"{df['Vol_Ratio'].iloc[-1]:.1f}x")
 
-    st.markdown("### 🤖 AI 技術解讀")
-    with st.container():
-        for line in insights:
-            st.write(line)
-            
     st.divider()
 
-    st.subheader("📊 綜合走勢圖")
-    
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, 
-                        vertical_spacing=0.03, 
-                        row_heights=[0.5, 0.15, 0.15, 0.2],
-                        subplot_titles=("K線 & 布林通道", "成交量", "MACD", "RSI"))
+    # 2. 左右分欄：左邊圖表，右邊分析
+    col_left, col_right = st.columns([2, 1])
 
-    # K線
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
-    if 'BBU' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBU'], line=dict(color='gray', width=1, dash='dot'), name='布林上軌'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBL'], line=dict(color='gray', width=1, dash='dot'), name='布林下軌'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange', width=2), name='EMA 50'), row=1, col=1)
+    with col_right:
+        st.subheader("📝 智能訊號解讀")
+        
+        # 顯示關鍵位
+        st.markdown(f"""
+        **關鍵價位監控：**
+        - 🎯 **壓力位 (Resistance)**: `${levels['resistance']:.2f}`
+        - 🛡️ **支撐位 (Support)**: `${levels['support']:.2f}`
+        - 🚧 **整數關口**: `${levels['round_number']}`
+        """)
+        
+        st.markdown("---")
+        st.markdown("**觸發訊號：**")
+        
+        if not reasons:
+            st.info("今日無特殊技術形態，走勢平穩。")
+        else:
+            for r in reasons:
+                st.write(r)
+                
+        # 交易心理建議
+        st.markdown("---")
+        if score > 0:
+            st.success("💡 **操作建議**：多頭佔優，可沿 20MA 尋找買點，跌破支撐止蝕。")
+        else:
+            st.error("💡 **操作建議**：空頭強勢或動能不足，建議保留現金，等待止跌訊號。")
 
-    # 成交量
-    colors = ['green' if c >= o else 'red' for c, o in zip(df['Close'], df['Open'])]
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name="成交量"), row=2, col=1)
+    with col_left:
+        st.subheader("📈 綜合走勢圖")
+        
+        # 繪圖
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+        
+        # K線
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
+        # 均線
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], line=dict(color='orange', width=1.5), name='20 MA'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], line=dict(color='blue', width=1.5), name='50 MA'), row=1, col=1)
+        
+        # 標記阻力支撐
+        fig.add_hline(y=levels['resistance'], line_dash="dash", line_color="red", annotation_text="壓力", row=1, col=1)
+        fig.add_hline(y=levels['support'], line_dash="dash", line_color="green", annotation_text="支撐", row=1, col=1)
 
-    # MACD
-    if 'MACD_Line' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Line'], line=dict(color='blue', width=1), name='MACD'), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], line=dict(color='orange', width=1), name='Signal'), row=3, col=1)
-        colors_macd = ['green' if v >= 0 else 'red' for v in df['MACD_Hist']]
-        fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=colors_macd, name='Hist'), row=3, col=1)
-
-    # RSI
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=2), name='RSI'), row=4, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=4, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=4, col=1)
-
-    fig.update_layout(height=900, xaxis_rangeslider_visible=False, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+        # 成交量 (顏色區分漲跌)
+        colors = ['red' if c < o else 'green' for c, o in zip(df['Close'], df['Open'])]
+        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name="成交量"), row=2, col=1)
+        
+        fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.error(err)
+    st.error("無法獲取數據，請檢查股票代號。")

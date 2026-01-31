@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- 1. 網頁設定 ---
-st.set_page_config(page_title="VIP 機構狙擊系統 V13.0", layout="wide")
+st.set_page_config(page_title="VIP 雙核戰略系統 V13.1", layout="wide")
 
 # --- 2. 密碼鎖 ---
 def check_password():
@@ -15,8 +15,8 @@ def check_password():
         st.session_state.password_correct = False
     
     if not st.session_state.password_correct:
-        st.markdown("## 🔒 VIP 機構狙擊系統 V13.0")
-        st.caption("新增：SMC 數據列表 | 斐波那契回調預測 | 鯨魚成交量偵測")
+        st.markdown("## 🔒 VIP 雙核戰略系統 V13.1 (增強版)")
+        st.caption("新增：均線突破信號 (MA Breakout) | 關鍵阻力位標示")
         password = st.text_input("請輸入通行密碼", type="password")
         if st.button("登入"):
             if password == "VIP888":
@@ -33,11 +33,13 @@ st.sidebar.title("🎛️ 雙核控制台")
 symbol = st.sidebar.text_input("輸入美股代號", value="NVDA").upper()
 st.sidebar.markdown("---")
 st.sidebar.info("""
-**V13.0 機構數據升級：**
-在「機構透視」頁面新增：
-1. **Premium/Discount**: 判斷價格貴賤。
-2. **Key Level Table**: FVG/OB 精確報價表。
-3. **Whale Level**: 最大量 K 線價格。
+**V13.1 更新日誌：**
+1. **🚀 智能戰術**：
+   - 新增 EMA 20/50/100 突破提示。
+   - 自動標示近期關鍵阻力位。
+   
+2. **🏛️ 機構透視** (保持 V13)：
+   - 繼續提供 FVG、Order Block、鯨魚單。
 """)
 
 # --- 3. 核心數據引擎 ---
@@ -48,11 +50,14 @@ def get_data(ticker):
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # --- V9 指標 ---
+        # --- 技術指標 ---
+        # 均線組
         df['EMA_20'] = ta.ema(df['Close'], length=20)
         df['EMA_50'] = ta.ema(df['Close'], length=50)
+        df['EMA_100'] = ta.ema(df['Close'], length=100)
         df['EMA_150'] = ta.ema(df['Close'], length=150)
         df['EMA_200'] = ta.ema(df['Close'], length=200)
+        
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         df['RSI'] = ta.rsi(df['Close'], length=14)
         
@@ -76,210 +81,197 @@ def get_data(ticker):
         df['ADX'] = adx['ADX_14']
         df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
         df['Vol_Ratio'] = df['Volume'] / df['Vol_SMA']
-        df['Body'] = abs(df['Close'] - df['Open'])
         
         df.dropna(inplace=True)
         return df
     except:
         return None
 
-# --- 4. 戰術計算 (Retail) ---
-def generate_execution_plan(df):
-    last = df.iloc[-1]
-    close = last['Close']
-    trend_dir = last['Trend_Dir']
-    stop = last['SuperTrend']
-    
-    recent_high = df['High'].tail(20).max()
-    resistance = close * 1.05 if close >= recent_high else recent_high
-    res_desc = "新高突破預測" if close >= recent_high else "前波高點壓力"
-        
-    risk = abs(close - stop)
-    if trend_dir == 1:
-        action = "🟢 做多 (BUY)"
-        entry = close
-        target = close + (risk * 2)
-        trend_status = "多頭趨勢"
-    else:
-        action = "🔴 做空 (SELL)"
-        entry = close
-        target = close - (risk * 2)
-        trend_status = "空頭趨勢"
-        
-    strength = "🔥 強勢" if last['ADX'] > 25 else "☁️ 震盪"
-    return {"trend": trend_status, "strength": strength, "wt": last['WT1'], "action": action, "entry": entry, "target": target, "stop": stop, "resistance": resistance, "res_desc": res_desc}
-
-def detect_retail_signals(df):
+# --- 4. 戰術信號 (增強版：加入 MA 突破) ---
+def detect_enhanced_signals(df):
     signals = []
+    # 只分析最近 100 天
     start = max(0, len(df)-100)
+    
+    # 計算近 30 天的高點作為阻力
+    recent_high = df['High'].tail(30).max()
+    
     for i in range(start, len(df)):
         curr = df.iloc[i]; prev = df.iloc[i-1]; date = df.index[i]
-        if curr['Vol_Ratio'] >= 2.0: signals.append({"date": date, "price": curr['High'], "text": "🔥VH", "color": "red", "ay": -40})
+        
+        # A. 原有信號
+        # 1. VH 爆量
+        if curr['Vol_Ratio'] >= 2.0:
+            signals.append({"date": date, "price": curr['High'], "text": "🔥VH", "color": "red", "ay": -45})
+        # 2. 吞沒
         if curr['Close'] > curr['Open'] and prev['Close'] < prev['Open']:
-            if curr['Close'] > prev['Open'] and curr['Open'] < prev['Close']: signals.append({"date": date, "price": curr['Low'], "text": "🐂吞沒", "color": "green", "ay": 40})
-        if curr['WT1'] < -50 and curr['WT1'] > curr['WT2'] and prev['WT1'] <= prev['WT2']: signals.append({"date": date, "price": curr['Low'] - curr['ATR'], "text": "💎", "color": "cyan", "ay": 25})
-    return signals
+            if curr['Close'] > prev['Open'] and curr['Open'] < prev['Close']:
+                signals.append({"date": date, "price": curr['Low'], "text": "🐂吞沒", "color": "green", "ay": 45})
+        # 3. WT 鑽石
+        if curr['WT1'] < -50 and curr['WT1'] > curr['WT2'] and prev['WT1'] <= prev['WT2']:
+            signals.append({"date": date, "price": curr['Low'] - curr['ATR'], "text": "💎", "color": "cyan", "ay": 30})
 
-# --- 5. 機構計算模組 (SMC V13 Advanced) ---
+        # B. 新增：均線突破信號 (MA Crossover)
+        # 突破 EMA 20
+        if curr['Close'] > curr['EMA_20'] and prev['Close'] <= prev['EMA_20']:
+             signals.append({"date": date, "price": curr['EMA_20'], "text": "🚀破20線", "color": "yellow", "ay": 20})
+        elif curr['Close'] < curr['EMA_20'] and prev['Close'] >= prev['EMA_20']:
+             signals.append({"date": date, "price": curr['EMA_20'], "text": "⚠️失20線", "color": "orange", "ay": -20})
+             
+        # 突破 EMA 50 (重要強弱分界)
+        if curr['Close'] > curr['EMA_50'] and prev['Close'] <= prev['EMA_50']:
+             signals.append({"date": date, "price": curr['EMA_50'], "text": "⚡站上50線", "color": "white", "ay": 25})
+             
+        # 突破 EMA 100 (長期趨勢)
+        if curr['Close'] > curr['EMA_100'] and prev['Close'] <= prev['EMA_100']:
+             signals.append({"date": date, "price": curr['EMA_100'], "text": "🦅牛市啟動(破100)", "color": "magenta", "ay": 30})
+
+    return signals, recent_high
+
+# --- 5. 機構計算模組 (保持 V13) ---
 def calculate_smc_advanced(df):
     fvgs = []
     obs = []
-    
-    # A. 尋找 FVG 和 OB (邏輯同 V12)
     start = max(0, len(df)-60)
     for i in range(start, len(df)):
-        # Bull FVG
         if df['Low'].iloc[i] > df['High'].iloc[i-2] and df['Close'].iloc[i-1] > df['Open'].iloc[i-1]:
-            fvgs.append({"type": "Bull FVG", "top": df['Low'].iloc[i], "bottom": df['High'].iloc[i-2], "date": df.index[i-1], "status": "Active"})
-        # Bear FVG
+            fvgs.append({"type": "Bull FVG", "top": df['Low'].iloc[i], "bottom": df['High'].iloc[i-2], "date": df.index[i-1]})
         if df['High'].iloc[i] < df['Low'].iloc[i-2] and df['Close'].iloc[i-1] < df['Open'].iloc[i-1]:
-            fvgs.append({"type": "Bear FVG", "top": df['Low'].iloc[i-2], "bottom": df['High'].iloc[i], "date": df.index[i-1], "status": "Active"})
+            fvgs.append({"type": "Bear FVG", "top": df['Low'].iloc[i-2], "bottom": df['High'].iloc[i], "date": df.index[i-1]})
             
     for i in range(start, len(df)-2):
-        # Bull OB
         if df['Low'].iloc[i] < df['Low'].iloc[i-1] and df['Low'].iloc[i] < df['Low'].iloc[i+1]:
-            if df['Close'].iloc[i] < df['Open'].iloc[i]: # 陰線
+            if df['Close'].iloc[i] < df['Open'].iloc[i]: 
                 if df['Close'].iloc[i+1] > df['High'].iloc[i] or df['Close'].iloc[i+2] > df['High'].iloc[i]:
-                    obs.append({"type": "Bull OB", "top": df['High'].iloc[i], "bottom": df['Low'].iloc[i], "date": df.index[i], "status": "Active"})
+                    obs.append({"type": "Bull OB", "top": df['High'].iloc[i], "bottom": df['Low'].iloc[i], "date": df.index[i]})
 
-    # B. 鯨魚偵測 (Whale Detection) - 過去 30 天最大量
     recent_df = df.tail(30)
     max_vol_idx = recent_df['Volume'].idxmax()
-    whale_candle = {
-        "price": recent_df.loc[max_vol_idx, 'Close'],
-        "volume": recent_df.loc[max_vol_idx, 'Volume'],
-        "date": max_vol_idx,
-        "type": "Whale"
-    }
+    whale_candle = {"price": recent_df.loc[max_vol_idx, 'Close'], "date": max_vol_idx}
 
-    # C. 市場結構 (Premium vs Discount)
-    # 取過去 50 天的高低點作為 Range
     swing_high = df['High'].tail(50).max()
     swing_low = df['Low'].tail(50).min()
     current_price = df['Close'].iloc[-1]
     mid_point = (swing_high + swing_low) / 2
-    
-    # 斐波那契回調位 (Fibonacci Retracement)
-    fib_618 = swing_low + 0.618 * (swing_high - swing_low) # 黃金回調位 (若是多頭)
-    
     market_structure = {
-        "range_high": swing_high,
-        "range_low": swing_low,
-        "mid_point": mid_point,
-        "fib_618": fib_618,
-        "zone": "🔴 溢價區 (Premium - 找賣點)" if current_price > mid_point else "🟢 折價區 (Discount - 找買點)"
+        "range_high": swing_high, "range_low": swing_low,
+        "fib_618": swing_low + 0.618 * (swing_high - swing_low),
+        "zone": "🔴 溢價區 (Premium)" if current_price > mid_point else "🟢 折價區 (Discount)"
     }
-
     return fvgs, obs, whale_candle, market_structure
 
 # --- 主程式 UI ---
-st.title(f"📊 {symbol} 雙核戰略系統 V13.0 (狙擊版)")
+st.title(f"📊 {symbol} 雙核戰略系統 V13.1")
 df = get_data(symbol)
 
 if df is not None:
     
-    tab_retail, tab_inst = st.tabs(["🚀 智能戰術 (執行點位)", "🏛️ 機構透視 (深度數據)"])
+    tab_retail, tab_inst = st.tabs(["🚀 智能戰術 (技術增強版)", "🏛️ 機構透視 (深度數據)"])
     
     # ==========================================
-    # Tab 1: 智能戰術 (保持 V12)
+    # Tab 1: 智能戰術 (增強版)
     # ==========================================
     with tab_retail:
-        plan = generate_execution_plan(df)
-        st.caption("📡 戰場環境數據")
-        e1, e2, e3, e4 = st.columns(4)
-        e1.metric("市場趨勢", plan['trend'])
-        e2.metric("趨勢強度", f"{df['ADX'].iloc[-1]:.1f}", plan['strength'])
-        e3.metric("WaveTrend", f"{plan['wt']:.1f}")
-        e4.metric("操作建議", plan['action'], delta_color="off")
+        # 計算戰術數據
+        last_close = df['Close'].iloc[-1]
+        ema20 = df['EMA_20'].iloc[-1]
+        ema50 = df['EMA_50'].iloc[-1]
+        ema100 = df['EMA_100'].iloc[-1]
+        stop_loss = df['SuperTrend'].iloc[-1]
         
-        st.divider()
-        st.subheader("📋 交易執行計劃")
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("🎯 參與買入價", f"${plan['entry']:.2f}")
-        p2.metric("💰 賣出獲利價", f"${plan['target']:.2f}")
-        p3.metric("🚧 關鍵阻力位", f"${plan['resistance']:.2f}")
-        p4.metric("🛡️ 智能止損", f"${plan['stop']:.2f}", delta_color="inverse")
+        # 1. 頂部狀態列
+        st.subheader("📡 技術指標雷達 (Technical Radar)")
+        c1, c2, c3, c4 = st.columns(4)
         
+        # 判斷均線狀態
+        ma_status = "多頭排列 🚀" if last_close > ema20 > ema50 else "震盪整理 ⚖️"
+        if last_close < ema20 and last_close < ema50: ma_status = "空頭壓制 🔴"
+        
+        c1.metric("市場趨勢", ma_status)
+        c2.metric("趨勢強度 (ADX)", f"{df['ADX'].iloc[-1]:.1f}")
+        c3.metric("WaveTrend 動能", f"{df['WT1'].iloc[-1]:.1f}")
+        c4.metric("智能止損 (SuperTrend)", f"${stop_loss:.2f}")
+
+        # 2. 均線檢核表 (Checklist)
+        st.markdown(f"""
+        **均線攻防戰：**
+        * 短線 (EMA 20): **${ema20:.2f}** ({'✅ 站上' if last_close > ema20 else '❌ 跌破'})
+        * 中線 (EMA 50): **${ema50:.2f}** ({'✅ 站上' if last_close > ema50 else '❌ 跌破'}) - *生命線*
+        * 長線 (EMA 100): **${ema100:.2f}** ({'✅ 站上' if last_close > ema100 else '❌ 跌破'}) - *牛熊分界*
+        """)
+
+        # 3. 繪圖
         fig_v9 = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+        
+        # K線
         fig_v9.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
-        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_150'], line=dict(width=1, color='rgba(0,128,0,0.5)'), name="EMA 150"), row=1, col=1)
-        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(width=1, color='rgba(128,0,0,0.5)'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)', name="EMA 雲"), row=1, col=1)
-        fig_v9.add_trace(go.Scatter(x=df.index, y=df['SuperTrend'], mode='lines', line=dict(color='orange', width=2, dash='dash'), name="SuperTrend"), row=1, col=1)
-        fig_v9.add_hline(y=plan['resistance'], line_dash="dot", line_color="red", row=1, col=1)
-        fig_v9.add_hline(y=plan['target'], line_dash="dot", line_color="green", row=1, col=1)
         
-        signals = detect_retail_signals(df)
-        annotations = [dict(x=s['date'], y=s['price'], text=s['text'], showarrow=True, ax=0, ay=s['ay'], font=dict(color=s['color'])) for s in signals]
-        fig_v9.update_layout(height=700, xaxis_rangeslider_visible=False, annotations=annotations, template="plotly_dark", title="智能戰術圖表")
+        # 均線組 (視覺化)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange', width=1.5), name="EMA 50"), row=1, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_100'], line=dict(color='blue', width=1.5), name="EMA 100"), row=1, col=1)
         
+        # 雲帶 (保留背景)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_150'], line=dict(width=0, color='rgba(0,128,0,0)'), showlegend=False), row=1, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(width=0, color='rgba(128,0,0,0)'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)', name="長線雲帶"), row=1, col=1)
+        
+        # SuperTrend (虛線)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['SuperTrend'], mode='lines', line=dict(color='gray', width=1, dash='dash'), name="SuperTrend止損"), row=1, col=1)
+
+        # 取得信號與阻力位
+        signals, res_price = detect_enhanced_signals(df)
+        
+        # 畫阻力線
+        fig_v9.add_hline(y=res_price, line_dash="solid", line_color="red", line_width=1, annotation_text=f"近期關鍵阻力 ${res_price:.2f}", annotation_position="top right", row=1, col=1)
+
+        # 標註信號
+        annotations = []
+        for s in signals:
+            annotations.append(dict(
+                x=s['date'], y=s['price'], xref="x", yref="y",
+                text=s['text'], showarrow=True, arrowhead=2, ax=0, ay=s['ay'],
+                font=dict(color=s['color'], size=10, family="Arial Black")
+            ))
+        
+        # 副圖 (WaveTrend)
         fig_v9.add_trace(go.Scatter(x=df.index, y=df['WT1'], line=dict(color='cyan'), name="WT 快線"), row=2, col=1)
         fig_v9.add_trace(go.Scatter(x=df.index, y=df['WT2'], line=dict(color='red', dash='dot'), name="WT 慢線"), row=2, col=1)
         fig_v9.add_hline(y=60, line_dash="dot", row=2, col=1); fig_v9.add_hline(y=-60, line_dash="dot", row=2, col=1)
+
+        fig_v9.update_layout(height=700, xaxis_rangeslider_visible=False, title=f"{symbol} 智能戰術圖表 (含均線信號)", annotations=annotations, template="plotly_dark")
         st.plotly_chart(fig_v9, use_container_width=True)
+        
+        st.info("💡 **操作指引**：當 K 線出現「🚀 破20線」且下方有「💎」符號時，為強烈短線買入信號。若跌破紅色的「關鍵阻力線」後回測不過，則視為賣出信號。")
 
     # ==========================================
-    # Tab 2: 機構透視 (V13 重磅升級)
+    # Tab 2: 機構透視 (保留原汁原味 V13)
     # ==========================================
     with tab_inst:
         fvgs, obs, whale, struct = calculate_smc_advanced(df)
-        last_price = df['Close'].iloc[-1]
-
-        # 1. 機構戰情面板
+        
         st.subheader("🏛️ 機構戰情數據中心 (SMC Dashboard)")
+        c1, c2, c3 = st.columns(3)
+        c1.info(f"**市場位置**\n\n### {struct['zone']}")
+        c2.warning(f"**🐳 鯨魚入場價**\n\n### ${whale['price']:.2f}")
+        c3.success(f"**黃金回調 (0.618)**\n\n### ${struct['fib_618']:.2f}")
         
-        col_main1, col_main2, col_main3 = st.columns(3)
-        
-        # A. 價格位置 (Premium/Discount)
-        col_main1.info(f"**目前市場位置**\n\n### {struct['zone']}")
-        col_main1.caption(f"區間高點: ${struct['range_high']:.2f} | 低點: ${struct['range_low']:.2f}")
-
-        # B. 鯨魚活動
-        col_main2.warning(f"**🐳 鯨魚(最大量)入場價**\n\n### ${whale['price']:.2f}")
-        col_main2.caption(f"發生日期: {whale['date'].strftime('%Y-%m-%d')} (近30日最大量)")
-        
-        # C. 最佳回調預測 (Fibonacci)
-        col_main3.success(f"**黃金回調預測位 (0.618)**\n\n### ${struct['fib_618']:.2f}")
-        col_main3.caption("機構最常掛單的「搭車點」")
-
         st.markdown("---")
-        
-        # 2. 關鍵價位清單 (Table)
-        st.write("#### 🧱 機構關鍵價位清單 (Key Levels Cheat Sheet)")
-        
-        # 整理數據為 DataFrame
+        st.write("#### 🧱 機構關鍵價位清單")
         table_data = []
-        # 加入 OB
-        for ob in obs[-3:]: # 只列出最近 3 個
-            table_data.append({"類型": "🟦 Order Block (機構建倉)", "方向": "看漲支撐", "頂部價格": f"${ob['top']:.2f}", "底部價格": f"${ob['bottom']:.2f}", "日期": ob['date'].strftime('%Y-%m-%d')})
-        # 加入 FVG
-        for fvg in fvgs[-3:]:
-            direction = "🟢 看漲支撐" if "Bull" in fvg['type'] else "🔴 看跌壓力"
-            color = "Bull" if "Bull" in fvg['type'] else "Bear"
-            table_data.append({"類型": f"Other ({fvg['type']})", "方向": direction, "頂部價格": f"${fvg['top']:.2f}", "底部價格": f"${fvg['bottom']:.2f}", "日期": fvg['date'].strftime('%Y-%m-%d')})
-            
+        for ob in obs[-3:]: table_data.append({"類型": "🟦 Order Block", "方向": "看漲支撐", "頂部": f"${ob['top']:.2f}", "底部": f"${ob['bottom']:.2f}", "日期": ob['date'].strftime('%Y-%m-%d')})
+        for fvg in fvgs[-3:]: table_data.append({"類型": f"Other ({fvg['type']})", "方向": "支撐/壓力", "頂部": f"${fvg['top']:.2f}", "底部": f"${fvg['bottom']:.2f}", "日期": fvg['date'].strftime('%Y-%m-%d')})
         st.dataframe(pd.DataFrame(table_data), use_container_width=True)
-        st.caption("💡 **操作指引**：請將上述價格設為您的券商「到價提醒」。當價格回落至 **Order Block** 或 **Bull FVG** 時，是高勝率買點。")
-
-        # 3. 機構圖表 (升級版)
+        
         fig_v10 = go.Figure()
         fig_v10.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"))
-        
-        # 畫 FVG
         for box in fvgs:
             color = "rgba(0, 255, 0, 0.2)" if "Bull" in box['type'] else "rgba(255, 0, 0, 0.2)"
             fig_v10.add_shape(type="rect", x0=box['date'], y0=box['bottom'], x1=df.index[-1], y1=box['top'], line=dict(width=0), fillcolor=color, layer="below")
-            
-        # 畫 Order Blocks
         for ob in obs:
             fig_v10.add_shape(type="rect", x0=ob['date'], y0=ob['bottom'], x1=df.index[-1], y1=ob['top'], line=dict(color="blue", width=1, dash="dot"), fillcolor="rgba(0, 0, 255, 0.15)", layer="below")
-            
-        # 畫 鯨魚線
-        fig_v10.add_hline(y=whale['price'], line_dash="solid", line_color="purple", line_width=2, annotation_text="🐳 Whale Entry", annotation_position="top right")
-
-        # 畫 Fibonacci 0.618
-        fig_v10.add_hline(y=struct['fib_618'], line_dash="dash", line_color="gold", line_width=2, annotation_text="Fib 0.618 (Golden Pocket)", annotation_position="bottom right")
-
-        fig_v10.update_layout(height=750, xaxis_rangeslider_visible=False, title=f"{symbol} 機構深度透視圖 (FVG + OB + Whale)", template="plotly_dark")
+        fig_v10.add_hline(y=whale['price'], line_color="purple", annotation_text="🐳 Whale Entry")
+        fig_v10.add_hline(y=struct['fib_618'], line_dash="dash", line_color="gold", annotation_text="Fib 0.618")
+        fig_v10.update_layout(height=750, xaxis_rangeslider_visible=False, title=f"{symbol} 機構透視圖", template="plotly_dark")
         st.plotly_chart(fig_v10, use_container_width=True)
 
 else:

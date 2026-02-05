@@ -1,240 +1,278 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# --- 1. 基礎設定 ---
-st.set_page_config(page_title="Trend Catchers V14 (No-Lib)", layout="wide", page_icon="🦈")
+# --- 1. 網頁設定 ---
+st.set_page_config(page_title="VIP 雙核戰略系統 V13.1", layout="wide")
 
-# --- 2. 手工計算指標函數 (替代 pandas_ta) ---
-# 這些函數用純數學計算，保證不會崩潰
-def calc_ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
-
-def calc_sma(series, length):
-    return series.rolling(window=length).mean()
-
-def calc_atr(df, length=14):
-    high, low, close = df['High'], df['Low'], df['Close']
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/length, adjust=False).mean()
-
-def calc_supertrend(df, period=10, multiplier=3):
-    atr = calc_atr(df, period)
-    hl2 = (df['High'] + df['Low']) / 2
-    basic_upper = hl2 + (multiplier * atr)
-    basic_lower = hl2 - (multiplier * atr)
+# --- 2. 密碼鎖 ---
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
     
-    final_upper = [basic_upper.iloc[0]]
-    final_lower = [basic_lower.iloc[0]]
-    trend = [1] # 1: Up, -1: Down
-    
-    close = df['Close'].values
-    bu = basic_upper.values
-    bl = basic_lower.values
-    
-    for i in range(1, len(df)):
-        # 計算上軌
-        if bu[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-            final_upper.append(bu[i])
-        else:
-            final_upper.append(final_upper[i-1])
-            
-        # 計算下軌
-        if bl[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-            final_lower.append(bl[i])
-        else:
-            final_lower.append(final_lower[i-1])
-            
-        # 判斷趨勢
-        prev_trend = trend[i-1]
-        if prev_trend == 1:
-            if close[i] < final_lower[i]:
-                trend.append(-1)
+    if not st.session_state.password_correct:
+        st.markdown("## 🔒 VIP 雙核戰略系統 V13.1 (增強版)")
+        st.caption("新增：均線突破信號 (MA Breakout) | 關鍵阻力位標示")
+        password = st.text_input("請輸入通行密碼", type="password")
+        if st.button("登入"):
+            if password == "VIP888":
+                st.session_state.password_correct = True
+                st.rerun()
             else:
-                trend.append(1)
-        else:
-            if close[i] > final_upper[i]:
-                trend.append(1)
-            else:
-                trend.append(-1)
-                
-    st_line = np.where(np.array(trend)==1, final_lower, final_upper)
-    return pd.Series(st_line, index=df.index), pd.Series(trend, index=df.index)
+                st.error("❌ 密碼錯誤")
+        st.stop()
 
-def calc_adx(df, length=14):
-    high, low = df['High'], df['Low']
-    close = df['Close']
-    
-    plus_dm = high.diff()
-    minus_dm = low.diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    
-    tr = calc_atr(df, length) # 用 ATR 近似 TR Smooth
-    plus_di = 100 * (plus_dm.ewm(alpha=1/length, adjust=False).mean() / tr)
-    minus_di = 100 * (minus_dm.abs().ewm(alpha=1/length, adjust=False).mean() / tr)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
-    return dx.ewm(alpha=1/length, adjust=False).mean()
+check_password()
 
-def calc_wavetrend(df):
-    tp = (df['High'] + df['Low'] + df['Close']) / 3
-    esa = calc_ema(tp, 10)
-    d = calc_ema((tp - esa).abs(), 10)
-    ci = (tp - esa) / (0.015 * d)
-    wt1 = calc_ema(ci, 21)
-    wt2 = calc_sma(wt1, 4)
-    return wt1, wt2
+# --- 側邊欄 ---
+st.sidebar.title("🎛️ 雙核控制台")
+symbol = st.sidebar.text_input("輸入美股代號", value="NVDA").upper()
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**V13.1 更新日誌：**
+1. **🚀 智能戰術**：
+   - 新增 EMA 20/50/100 突破提示。
+   - 自動標示近期關鍵阻力位。
+   
+2. **🏛️ 機構透視** (保持 V13)：
+   - 繼續提供 FVG、Order Block、鯨魚單。
+""")
 
-# --- 3. 數據下載引擎 ---
-@st.cache_data(ttl=1800)
+# --- 3. 核心數據引擎 ---
+@st.cache_data(ttl=3600)
 def get_data(ticker):
     try:
-        # 下載數據
-        df = yf.download(ticker, period="3y", progress=False, auto_adjust=False)
-        
-        # 格式修復
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.columns = [c.capitalize() for c in df.columns]
-        
-        # 移除時區
-        df.index = pd.to_datetime(df.index)
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-            
+        df = yf.download(ticker, period="2y", progress=False)
         if df.empty: return None
-
-        # --- 套用手工指標 ---
-        df['EMA_50'] = calc_ema(df['Close'], 50)
-        df['EMA_200'] = calc_ema(df['Close'], 200)
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        st_line, st_dir = calc_supertrend(df)
-        df['SuperTrend'] = st_line
-        df['Trend_Dir'] = st_dir
+        # --- 技術指標 ---
+        # 均線組
+        df['EMA_20'] = ta.ema(df['Close'], length=20)
+        df['EMA_50'] = ta.ema(df['Close'], length=50)
+        df['EMA_100'] = ta.ema(df['Close'], length=100)
+        df['EMA_150'] = ta.ema(df['Close'], length=150)
+        df['EMA_200'] = ta.ema(df['Close'], length=200)
         
-        df['ADX'] = calc_adx(df)
-        df['WT1'], df['WT2'] = calc_wavetrend(df)
+        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+        df['RSI'] = ta.rsi(df['Close'], length=14)
         
-        # 擠壓 (簡單版)
-        bb_mid = calc_sma(df['Close'], 20)
-        bb_std = df['Close'].rolling(20).std()
-        df['BB_Upper'] = bb_mid + 2 * bb_std
-        df['BB_Lower'] = bb_mid - 2 * bb_std
+        # SuperTrend
+        st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=10, multiplier=3)
+        st_col = [c for c in st_data.columns if "SUPERT_" in c][0]
+        st_dir = [c for c in st_data.columns if "SUPERTd_" in c][0]
+        df['SuperTrend'] = st_data[st_col]
+        df['Trend_Dir'] = st_data[st_dir]
         
-        atr = calc_atr(df, 20)
-        df['KC_Upper'] = bb_mid + 1.5 * atr
-        df['KC_Lower'] = bb_mid - 1.5 * atr
+        # WaveTrend
+        tp = (df['High'] + df['Low'] + df['Close']) / 3
+        esa = ta.ema(tp, length=10)
+        d = ta.ema((tp - esa).abs(), length=10)
+        ci = (tp - esa) / (0.015 * d)
+        df['WT1'] = ta.ema(ci, length=21)
+        df['WT2'] = ta.sma(df['WT1'], length=4)
         
-        df['Squeeze_On'] = (df['BB_Upper'] < df['KC_Upper']) & (df['BB_Lower'] > df['KC_Lower'])
+        # ADX & Volume
+        adx = ta.adx(df['High'], df['Low'], df['Close'])
+        df['ADX'] = adx['ADX_14']
+        df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
+        df['Vol_Ratio'] = df['Volume'] / df['Vol_SMA']
         
         df.dropna(inplace=True)
         return df
-        
-    except Exception as e:
-        st.error(f"數據處理錯誤: {e}")
+    except:
         return None
 
-# --- 4. 回測引擎 (V14) ---
-def run_backtest(df):
-    st.markdown("## 💰 V14 模擬回測報告")
+# --- 4. 戰術信號 (增強版：加入 MA 突破) ---
+def detect_enhanced_signals(df):
+    signals = []
+    # 只分析最近 100 天
+    start = max(0, len(df)-100)
     
-    capital = 100000.0
-    position = 0
-    entry_price = 0
-    log = []
-    equity_curve = []
+    # 計算近 30 天的高點作為阻力
+    recent_high = df['High'].tail(30).max()
     
-    # 預先計算可交易狀態
-    # 條件：ADX > 20 且 沒有擠壓
-    trade_mask = (df['ADX'] > 20) & (~df['Squeeze_On'])
-    
-    for i in range(1, len(df)-1):
-        curr = df.iloc[i]
-        nxt = df.iloc[i+1] # 成交價 (隔日開盤)
-        prev = df.iloc[i-1]
-        date = df.index[i]
+    for i in range(start, len(df)):
+        curr = df.iloc[i]; prev = df.iloc[i-1]; date = df.index[i]
         
-        current_val = capital if position == 0 else position * curr['Close']
-        equity_curve.append({"Date": date, "Equity": current_val})
-        
-        # --- 賣出邏輯 ---
-        if position > 0:
-            # 跌破 SuperTrend 或 跌破 EMA 50
-            if curr['Close'] < curr['SuperTrend'] or curr['Close'] < curr['EMA_50']:
-                sell_price = nxt['Open']
-                profit_pct = (sell_price - entry_price) / entry_price * 100
-                capital = position * sell_price
-                position = 0
-                log.append({"Date": nxt.name, "Type": "SELL", "Price": sell_price, "Return(%)": profit_pct})
-                
-        # --- 買入邏輯 ---
-        elif position == 0 and trade_mask.iloc[i]:
-            # 1. WT 黃金交叉 (且在超賣區)
-            wt_signal = (curr['WT1'] < -40) and (curr['WT1'] > curr['WT2']) and (prev['WT1'] <= prev['WT2'])
-            # 2. 突破 EMA 50
-            ema_signal = (curr['Close'] > curr['EMA_50']) and (prev['Close'] <= prev['EMA_50'])
+        # A. 原有信號
+        # 1. VH 爆量
+        if curr['Vol_Ratio'] >= 2.0:
+            signals.append({"date": date, "price": curr['High'], "text": "🔥VH", "color": "red", "ay": -45})
+        # 2. 吞沒
+        if curr['Close'] > curr['Open'] and prev['Close'] < prev['Open']:
+            if curr['Close'] > prev['Open'] and curr['Open'] < prev['Close']:
+                signals.append({"date": date, "price": curr['Low'], "text": "🐂吞沒", "color": "green", "ay": 45})
+        # 3. WT 鑽石
+        if curr['WT1'] < -50 and curr['WT1'] > curr['WT2'] and prev['WT1'] <= prev['WT2']:
+            signals.append({"date": date, "price": curr['Low'] - curr['ATR'], "text": "💎", "color": "cyan", "ay": 30})
+
+        # B. 新增：均線突破信號 (MA Crossover)
+        # 突破 EMA 20
+        if curr['Close'] > curr['EMA_20'] and prev['Close'] <= prev['EMA_20']:
+             signals.append({"date": date, "price": curr['EMA_20'], "text": "🚀破20線", "color": "yellow", "ay": 20})
+        elif curr['Close'] < curr['EMA_20'] and prev['Close'] >= prev['EMA_20']:
+             signals.append({"date": date, "price": curr['EMA_20'], "text": "⚠️失20線", "color": "orange", "ay": -20})
+             
+        # 突破 EMA 50 (重要強弱分界)
+        if curr['Close'] > curr['EMA_50'] and prev['Close'] <= prev['EMA_50']:
+             signals.append({"date": date, "price": curr['EMA_50'], "text": "⚡站上50線", "color": "white", "ay": 25})
+             
+        # 突破 EMA 100 (長期趨勢)
+        if curr['Close'] > curr['EMA_100'] and prev['Close'] <= prev['EMA_100']:
+             signals.append({"date": date, "price": curr['EMA_100'], "text": "🦅牛市啟動(破100)", "color": "magenta", "ay": 30})
+
+    return signals, recent_high
+
+# --- 5. 機構計算模組 (保持 V13) ---
+def calculate_smc_advanced(df):
+    fvgs = []
+    obs = []
+    start = max(0, len(df)-60)
+    for i in range(start, len(df)):
+        if df['Low'].iloc[i] > df['High'].iloc[i-2] and df['Close'].iloc[i-1] > df['Open'].iloc[i-1]:
+            fvgs.append({"type": "Bull FVG", "top": df['Low'].iloc[i], "bottom": df['High'].iloc[i-2], "date": df.index[i-1]})
+        if df['High'].iloc[i] < df['Low'].iloc[i-2] and df['Close'].iloc[i-1] < df['Open'].iloc[i-1]:
+            fvgs.append({"type": "Bear FVG", "top": df['Low'].iloc[i-2], "bottom": df['High'].iloc[i], "date": df.index[i-1]})
             
-            if (wt_signal or ema_signal) and curr['Trend_Dir'] == 1:
-                buy_price = nxt['Open']
-                position = capital / buy_price
-                entry_price = buy_price
-                capital = 0
-                log.append({"Date": nxt.name, "Type": "BUY", "Price": buy_price, "Return(%)": 0})
+    for i in range(start, len(df)-2):
+        if df['Low'].iloc[i] < df['Low'].iloc[i-1] and df['Low'].iloc[i] < df['Low'].iloc[i+1]:
+            if df['Close'].iloc[i] < df['Open'].iloc[i]: 
+                if df['Close'].iloc[i+1] > df['High'].iloc[i] or df['Close'].iloc[i+2] > df['High'].iloc[i]:
+                    obs.append({"type": "Bull OB", "top": df['High'].iloc[i], "bottom": df['Low'].iloc[i], "date": df.index[i]})
 
-    # 最終結算
-    final_val = capital if position == 0 else position * df.iloc[-1]['Close']
-    ret = (final_val - 100000) / 100000 * 100
-    
-    c1, c2 = st.columns(2)
-    c1.metric("最終獲利", f"${final_val:,.0f}", f"{ret:.1f}%")
-    c2.metric("交易次數", len(log)//2)
-    
-    if len(equity_curve) > 0:
-        st.line_chart(pd.DataFrame(equity_curve).set_index("Date"))
-    else:
-        st.warning("回測期間無交易")
+    recent_df = df.tail(30)
+    max_vol_idx = recent_df['Volume'].idxmax()
+    whale_candle = {"price": recent_df.loc[max_vol_idx, 'Close'], "date": max_vol_idx}
 
-# --- 主程式 ---
-# 密碼鎖
-if "auth" not in st.session_state: st.session_state.auth = False
-if not st.session_state.auth:
-    pwd = st.text_input("輸入密碼 (VIP888)", type="password")
-    if st.button("登入"):
-        if pwd == "VIP888": st.session_state.auth = True; st.rerun()
-    st.stop()
+    swing_high = df['High'].tail(50).max()
+    swing_low = df['Low'].tail(50).min()
+    current_price = df['Close'].iloc[-1]
+    mid_point = (swing_high + swing_low) / 2
+    market_structure = {
+        "range_high": swing_high, "range_low": swing_low,
+        "fib_618": swing_low + 0.618 * (swing_high - swing_low),
+        "zone": "🔴 溢價區 (Premium)" if current_price > mid_point else "🟢 折價區 (Discount)"
+    }
+    return fvgs, obs, whale_candle, market_structure
 
-# 介面
-symbol = st.sidebar.text_input("股票代號", "TSLA").upper()
-if st.button("重整數據"): st.cache_data.clear()
-
+# --- 主程式 UI ---
+st.title(f"📊 {symbol} 雙核戰略系統 V13.1")
 df = get_data(symbol)
 
 if df is not None:
-    tab1, tab2 = st.tabs(["📊 戰術圖表", "💰 回測結果"])
     
-    with tab1:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange'), name="EMA 50"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['SuperTrend'], line=dict(color='blue', dash='dot'), name="SuperTrend"), row=1, col=1)
+    tab_retail, tab_inst = st.tabs(["🚀 智能戰術 (技術增強版)", "🏛️ 機構透視 (深度數據)"])
+    
+    # ==========================================
+    # Tab 1: 智能戰術 (增強版)
+    # ==========================================
+    with tab_retail:
+        # 計算戰術數據
+        last_close = df['Close'].iloc[-1]
+        ema20 = df['EMA_20'].iloc[-1]
+        ema50 = df['EMA_50'].iloc[-1]
+        ema100 = df['EMA_100'].iloc[-1]
+        stop_loss = df['SuperTrend'].iloc[-1]
         
-        # 標記買點
-        buys = df[(df['Trend_Dir'] == 1) & (df['Close'] > df['EMA_50']) & (df['Close'].shift(1) <= df['EMA_50'].shift(1))]
-        fig.add_trace(go.Scatter(x=buys.index, y=buys['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=10, color='yellow'), name="Potential Buy"), row=1, col=1)
+        # 1. 頂部狀態列
+        st.subheader("📡 技術指標雷達 (Technical Radar)")
+        c1, c2, c3, c4 = st.columns(4)
+        
+        # 判斷均線狀態
+        ma_status = "多頭排列 🚀" if last_close > ema20 > ema50 else "震盪整理 ⚖️"
+        if last_close < ema20 and last_close < ema50: ma_status = "空頭壓制 🔴"
+        
+        c1.metric("市場趨勢", ma_status)
+        c2.metric("趨勢強度 (ADX)", f"{df['ADX'].iloc[-1]:.1f}")
+        c3.metric("WaveTrend 動能", f"{df['WT1'].iloc[-1]:.1f}")
+        c4.metric("智能止損 (SuperTrend)", f"${stop_loss:.2f}")
 
-        fig.add_trace(go.Bar(x=df.index, y=df['ADX'], name="ADX"), row=2, col=1)
-        fig.add_hline(y=20, line_dash="dot", row=2, col=1)
+        # 2. 均線檢核表 (Checklist)
+        st.markdown(f"""
+        **均線攻防戰：**
+        * 短線 (EMA 20): **${ema20:.2f}** ({'✅ 站上' if last_close > ema20 else '❌ 跌破'})
+        * 中線 (EMA 50): **${ema50:.2f}** ({'✅ 站上' if last_close > ema50 else '❌ 跌破'}) - *生命線*
+        * 長線 (EMA 100): **${ema100:.2f}** ({'✅ 站上' if last_close > ema100 else '❌ 跌破'}) - *牛熊分界*
+        """)
+
+        # 3. 繪圖
+        fig_v9 = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
         
-        st.plotly_chart(fig, use_container_width=True)
+        # K線
+        fig_v9.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
         
-    with tab2:
-        if st.button("🚀 開始 V14 回測 ($100k)"):
-            run_backtest(df)
+        # 均線組 (視覺化)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange', width=1.5), name="EMA 50"), row=1, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_100'], line=dict(color='blue', width=1.5), name="EMA 100"), row=1, col=1)
+        
+        # 雲帶 (保留背景)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_150'], line=dict(width=0, color='rgba(0,128,0,0)'), showlegend=False), row=1, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(width=0, color='rgba(128,0,0,0)'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)', name="長線雲帶"), row=1, col=1)
+        
+        # SuperTrend (虛線)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['SuperTrend'], mode='lines', line=dict(color='gray', width=1, dash='dash'), name="SuperTrend止損"), row=1, col=1)
+
+        # 取得信號與阻力位
+        signals, res_price = detect_enhanced_signals(df)
+        
+        # 畫阻力線
+        fig_v9.add_hline(y=res_price, line_dash="solid", line_color="red", line_width=1, annotation_text=f"近期關鍵阻力 ${res_price:.2f}", annotation_position="top right", row=1, col=1)
+
+        # 標註信號
+        annotations = []
+        for s in signals:
+            annotations.append(dict(
+                x=s['date'], y=s['price'], xref="x", yref="y",
+                text=s['text'], showarrow=True, arrowhead=2, ax=0, ay=s['ay'],
+                font=dict(color=s['color'], size=10, family="Arial Black")
+            ))
+        
+        # 副圖 (WaveTrend)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['WT1'], line=dict(color='cyan'), name="WT 快線"), row=2, col=1)
+        fig_v9.add_trace(go.Scatter(x=df.index, y=df['WT2'], line=dict(color='red', dash='dot'), name="WT 慢線"), row=2, col=1)
+        fig_v9.add_hline(y=60, line_dash="dot", row=2, col=1); fig_v9.add_hline(y=-60, line_dash="dot", row=2, col=1)
+
+        fig_v9.update_layout(height=700, xaxis_rangeslider_visible=False, title=f"{symbol} 智能戰術圖表 (含均線信號)", annotations=annotations, template="plotly_dark")
+        st.plotly_chart(fig_v9, use_container_width=True)
+        
+        st.info("💡 **操作指引**：當 K 線出現「🚀 破20線」且下方有「💎」符號時，為強烈短線買入信號。若跌破紅色的「關鍵阻力線」後回測不過，則視為賣出信號。")
+
+    # ==========================================
+    # Tab 2: 機構透視 (保留原汁原味 V13)
+    # ==========================================
+    with tab_inst:
+        fvgs, obs, whale, struct = calculate_smc_advanced(df)
+        
+        st.subheader("🏛️ 機構戰情數據中心 (SMC Dashboard)")
+        c1, c2, c3 = st.columns(3)
+        c1.info(f"**市場位置**\n\n### {struct['zone']}")
+        c2.warning(f"**🐳 鯨魚入場價**\n\n### ${whale['price']:.2f}")
+        c3.success(f"**黃金回調 (0.618)**\n\n### ${struct['fib_618']:.2f}")
+        
+        st.markdown("---")
+        st.write("#### 🧱 機構關鍵價位清單")
+        table_data = []
+        for ob in obs[-3:]: table_data.append({"類型": "🟦 Order Block", "方向": "看漲支撐", "頂部": f"${ob['top']:.2f}", "底部": f"${ob['bottom']:.2f}", "日期": ob['date'].strftime('%Y-%m-%d')})
+        for fvg in fvgs[-3:]: table_data.append({"類型": f"Other ({fvg['type']})", "方向": "支撐/壓力", "頂部": f"${fvg['top']:.2f}", "底部": f"${fvg['bottom']:.2f}", "日期": fvg['date'].strftime('%Y-%m-%d')})
+        st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+        
+        fig_v10 = go.Figure()
+        fig_v10.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"))
+        for box in fvgs:
+            color = "rgba(0, 255, 0, 0.2)" if "Bull" in box['type'] else "rgba(255, 0, 0, 0.2)"
+            fig_v10.add_shape(type="rect", x0=box['date'], y0=box['bottom'], x1=df.index[-1], y1=box['top'], line=dict(width=0), fillcolor=color, layer="below")
+        for ob in obs:
+            fig_v10.add_shape(type="rect", x0=ob['date'], y0=ob['bottom'], x1=df.index[-1], y1=ob['top'], line=dict(color="blue", width=1, dash="dot"), fillcolor="rgba(0, 0, 255, 0.15)", layer="below")
+        fig_v10.add_hline(y=whale['price'], line_color="purple", annotation_text="🐳 Whale Entry")
+        fig_v10.add_hline(y=struct['fib_618'], line_dash="dash", line_color="gold", annotation_text="Fib 0.618")
+        fig_v10.update_layout(height=750, xaxis_rangeslider_visible=False, title=f"{symbol} 機構透視圖", template="plotly_dark")
+        st.plotly_chart(fig_v10, use_container_width=True)
+
 else:
-    st.error("無法下載數據，請稍後再試。")
+    st.error("無法獲取數據")

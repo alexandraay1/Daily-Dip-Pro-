@@ -16,7 +16,7 @@ if "password_correct" not in st.session_state:
 def check_password():
     if not st.session_state.password_correct:
         st.markdown("## 🦈 Trend Catchers V14 (Quant Edition)")
-        st.caption("核心升級：市場狀態過濾 (Regime Filter) | VPA 量價分析 | 回測引擎")
+        st.caption("核心升級：市場狀態過濾 (Regime Filter) | VPA 量價分析 | 假突破防禦")
         password = st.text_input("輸入通行密碼", type="password")
         if st.button("Access Terminal"):
             if password == "VIP888":
@@ -30,22 +30,21 @@ check_password()
 
 # --- 側邊欄 ---
 st.sidebar.title("🎛️ 量化控制台")
-symbol = st.sidebar.text_input("美股代號", value="TSLA").upper() # 預設改為 TSLA 方便測試
+symbol = st.sidebar.text_input("美股代號", value="NVDA").upper()
 timeframe = st.sidebar.selectbox("分析週期", ["Daily", "Weekly"], index=0)
 st.sidebar.markdown("---")
 st.sidebar.info("""
 **V14 量化邏輯更新：**
 1. **🛡️ 盤整過濾**：ADX < 20 或包絡線擠壓時，屏蔽突破信號。
 2. **🐋 真鯨魚偵測**：排除長上影線的「出貨量」。
-3. **💰 回測引擎**：驗證策略真實回報。
+3. **📉 減法美學**：移除無效均線，只留關鍵位。
 """)
 
 # --- 3. 數據引擎 (優化版) ---
 @st.cache_data(ttl=1800)
 def get_data(ticker):
     try:
-        # 下載更多數據以供回測
-        df = yf.download(ticker, period="5y", progress=False) 
+        df = yf.download(ticker, period="2y", progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
@@ -60,11 +59,8 @@ def get_data(ticker):
         
         # SuperTrend (作為動態止損)
         st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=10, multiplier=3)
-        # 處理不同版本的 pandas_ta 返回列名可能不同的問題
-        st_col = [c for c in st_data.columns if "SUPERT_" in c][0]
-        st_dir = [c for c in st_data.columns if "SUPERTd_" in c][0]
-        df['SuperTrend'] = st_data[st_col]
-        df['Trend_Dir'] = st_data[st_dir]
+        df['SuperTrend'] = st_data[st_data.columns[0]]
+        df['Trend_Dir'] = st_data[st_data.columns[1]]
         
         # Bollinger Bands & Keltner Channels (用於偵測盤整擠壓)
         bb = ta.bbands(df['Close'], length=20, std=2)
@@ -91,8 +87,7 @@ def get_data(ticker):
         
         df.dropna(inplace=True)
         return df
-    except Exception as e:
-        print(e)
+    except:
         return None
 
 # --- 4. 智能分析模組 (Quant Filters) ---
@@ -127,6 +122,7 @@ def get_valid_signals(df, can_trade):
         curr = df.iloc[i]; prev = df.iloc[i-1]; date = df.index[i]
         
         # 1. 趨勢跟隨信號 (Trend Pullback)
+        # 邏輯：在多頭趨勢中，WT動能從低檔黃金交叉
         if curr['Trend_Dir'] == 1 and curr['WT1'] < -40 and curr['WT1'] > curr['WT2'] and prev['WT1'] <= prev['WT2']:
              signals.append({"date": date, "price": curr['Low'], "text": "💎趨勢回調買點", "color": "#00ff00", "ay": 30})
 
@@ -137,10 +133,14 @@ def get_valid_signals(df, can_trade):
     return signals
 
 def get_whale_zones(df):
-    recent = df.tail(60).copy()
+    # 優化版鯨魚偵測：必須是大陽線，且不能有長上影線
+    recent = df.tail(40).copy()
+    # 計算實體佔比
     recent['Body_Size'] = (recent['Close'] - recent['Open']).abs()
     recent['Total_Size'] = recent['High'] - recent['Low']
+    recent['Upper_Wick'] = recent['High'] - recent[['Open', 'Close']].max(axis=1)
     
+    # 篩選條件：量大 + 實體大 + 上影線短 (代表主力真心想買)
     mask = (recent['Volume'] > recent['Vol_SMA'] * 1.5) & \
            (recent['Body_Size'] > recent['Total_Size'] * 0.6) & \
            (recent['Close'] > recent['Open'])
@@ -149,124 +149,31 @@ def get_whale_zones(df):
     
     zones = []
     if not whales.empty:
+        # 取最近的一根有效鯨魚K
         last_whale = whales.iloc[-1]
         zones.append({
-            "price": last_whale['Low'], 
+            "price": last_whale['Low'], # 防守位通常是大量K的低點
             "top": last_whale['High'],
             "date": last_whale.name,
             "vol_ratio": last_whale['Vol_Ratio']
         })
     return zones
 
-# --- 5. SMC 結構 ---
+# --- 5. SMC 結構 (精簡版) ---
 def get_smc_structure(df):
+    # 只找最近的一個主要 FVG
     last_fvg = None
     start = max(0, len(df)-40)
     for i in range(start, len(df)):
         if df['Low'].iloc[i] > df['High'].iloc[i-2] and df['Close'].iloc[i-1] > df['Open'].iloc[i-1]:
             last_fvg = {"top": df['Low'].iloc[i], "bottom": df['High'].iloc[i-2], "date": df.index[i-1]}
             
+    # Fib 0.618
     swing_high = df['High'].tail(60).max()
     swing_low = df['Low'].tail(60).min()
     fib = swing_low + 0.618 * (swing_high - swing_low)
     
     return last_fvg, fib
-
-# --- 6. V14 回測引擎 (Backtest Engine) ---
-def run_backtest(df):
-    st.markdown("## 💰 V14 策略回測報告")
-    st.info("模擬條件：初始資金 $100,000 | 交易成本 0% | 依據 V14 嚴格信號執行")
-    
-    initial_capital = 100000.0
-    equity = initial_capital
-    position = 0
-    entry_price = 0
-    
-    equity_curve = []
-    trade_log = []
-    
-    # 預先計算每日是否可交易
-    regime_list = []
-    for i in range(len(df)):
-        row = df.iloc[i]
-        squeeze = (row['BB_Upper'] < row['KC_Upper']) and (row['BB_Lower'] > row['KC_Lower'])
-        adx_ok = row['ADX'] > 20
-        # 必須 ADX 強度夠，且沒有 Squeeze
-        regime_list.append(adx_ok and not squeeze)
-    
-    df['Can_Trade'] = regime_list
-    
-    # 回測迴圈 (只測最近 2 年，避免數據過舊)
-    start_idx = max(50, len(df) - 500) 
-    
-    for i in range(start_idx, len(df)-1):
-        curr = df.iloc[i]
-        nxt = df.iloc[i+1] # 用隔日開盤價成交
-        date = df.index[i]
-        
-        # --- 賣出邏輯 ---
-        if position > 0:
-            # 止損條件: 跌破 SuperTrend 或 EMA 50
-            stop_condition = (curr['Close'] < curr['SuperTrend']) or (curr['Close'] < curr['EMA_50'])
-            
-            if stop_condition:
-                sell_price = nxt['Open']
-                revenue = position * sell_price
-                profit = revenue - (position * entry_price)
-                profit_pct = (sell_price - entry_price) / entry_price * 100
-                
-                equity = revenue
-                position = 0
-                
-                trade_log.append({
-                    "Date": nxt.name, "Type": "SELL 🔴", 
-                    "Price": sell_price, "Profit($)": profit, "Return(%)": profit_pct,
-                    "Equity": equity
-                })
-        
-        # --- 買入邏輯 ---
-        elif position == 0 and curr['Can_Trade']:
-            # 信號 A: WT 黃金交叉
-            wt_signal = (curr['Trend_Dir'] == 1) and (curr['WT1'] < -40) and (curr['WT1'] > curr['WT2']) and (df.iloc[i-1]['WT1'] <= df.iloc[i-1]['WT2'])
-            # 信號 B: 站上 EMA 50
-            ema_signal = (curr['Close'] > curr['EMA_50']) and (df.iloc[i-1]['Close'] <= df.iloc[i-1]['EMA_50'])
-            
-            if wt_signal or ema_signal:
-                buy_price = nxt['Open']
-                position = equity / buy_price
-                entry_price = buy_price
-                equity = 0
-                
-                trade_log.append({
-                    "Date": nxt.name, "Type": "BUY 🟢", 
-                    "Price": buy_price, "Profit($)": 0, "Return(%)": 0,
-                    "Equity": entry_price * position
-                })
-        
-        # 紀錄淨值
-        current_equity = equity if position == 0 else position * curr['Close']
-        equity_curve.append({"Date": date, "Equity": current_equity})
-
-    # 結算
-    final_equity = equity if position == 0 else position * df.iloc[-1]['Close']
-    total_return = (final_equity - initial_capital) / initial_capital * 100
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("初始本金", f"${initial_capital:,.0f}")
-    c2.metric("最終淨值", f"${final_equity:,.0f}", f"{total_return:.2f}%")
-    c3.metric("總交易次數", f"{len(trade_log)//2}")
-    
-    # 畫圖
-    if equity_curve:
-        ec_df = pd.DataFrame(equity_curve).set_index("Date")
-        st.area_chart(ec_df)
-    
-    if trade_log:
-        with st.expander("查看詳細交易紀錄"):
-            st.dataframe(pd.DataFrame(trade_log))
-    else:
-        st.warning("在此期間內策略未觸發任何交易 (可能市場一直處於過濾狀態)")
-
 
 # --- 主程式 UI ---
 st.title(f"🦈 {symbol} 量化戰術終端 V14")
@@ -274,7 +181,7 @@ df = get_data(symbol)
 
 if df is not None:
     
-    # 1. 市場狀態儀表板
+    # 1. 市場狀態儀表板 (最重要！)
     regime, color, can_trade, advice = analyze_market_regime(df)
     
     with st.container():
@@ -286,31 +193,39 @@ if df is not None:
         
     st.divider()
 
-    # 定義 Tab (關鍵：tab1 在這裡定義)
     tab1, tab2 = st.tabs(["🚀 戰術圖表 (Tactical)", "🏛️ 機構數據 (Institutional)"])
     
     # --- Tab 1: 戰術圖表 ---
     with tab1:
+        # 準備數據
         signals = get_valid_signals(df, can_trade)
         whale_zones = get_whale_zones(df)
         
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
         
+        # K線
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange', width=2), name="EMA 50"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(color='blue', width=2), name="EMA 200"), row=1, col=1)
+        
+        # 關鍵均線
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange', width=2), name="EMA 50 (生命線)"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(color='blue', width=2), name="EMA 200 (牛熊線)"), row=1, col=1)
+        
+        # SuperTrend
         fig.add_trace(go.Scatter(x=df.index, y=df['SuperTrend'], line=dict(color='gray', dash='dot', width=1), name="Trailing Stop"), row=1, col=1)
         
+        # 繪製鯨魚支撐帶 (Whale Zone)
         if whale_zones:
             w = whale_zones[-1]
             fig.add_shape(type="rect", x0=w['date'], y0=w['price'], x1=df.index[-1], y1=w['top'], 
                          line=dict(width=0), fillcolor="rgba(128,0,128,0.2)", layer="below", row=1, col=1)
-            fig.add_annotation(x=df.index[-1], y=w['top'], text=f"🐳 Whale Support", showarrow=False, xanchor="left", font=dict(color="purple"), row=1, col=1)
+            fig.add_annotation(x=df.index[-1], y=w['top'], text=f"🐳 Whale Support (Vol x{w['vol_ratio']:.1f})", showarrow=False, xanchor="left", font=dict(color="purple"), row=1, col=1)
 
+        # 繪製信號
         annotations = []
         for s in signals:
             annotations.append(dict(x=s['date'], y=s['price'], text=s['text'], showarrow=True, arrowhead=2, ay=s['ay'], font=dict(color=s['color'], size=11, family="Arial Black")))
         
+        # 擠壓顯示 (Squeeze) - 在副圖顯示
         colors = ['red' if s else 'gray' for s in df['Squeeze_On']]
         fig.add_trace(go.Bar(x=df.index, y=df['ADX'], marker_color=colors, name="ADX / Squeeze"), row=2, col=1)
         fig.add_hline(y=20, line_dash="dot", line_color="white", row=2, col=1)
@@ -318,11 +233,7 @@ if df is not None:
         fig.update_layout(height=700, xaxis_rangeslider_visible=False, template="plotly_dark", annotations=annotations, title=f"{symbol} 量化戰術圖表")
         st.plotly_chart(fig, use_container_width=True)
         
-        # --- 回測按鈕放在這裡 (正確的縮排) ---
-        st.divider()
-        st.markdown("### 📊 策略驗證")
-        if st.button("🚀 執行 V14 模擬回測 ($100k Challenge)"):
-            run_backtest(df)
+        st.caption("副圖說明：灰色柱狀體為 ADX 強度。**紅色柱狀體**代表「市場擠壓中 (Squeeze)」，此時即將變盤，請留意突破方向。")
 
     # --- Tab 2: 機構數據 ---
     with tab2:
@@ -330,16 +241,25 @@ if df is not None:
         last_close = df['Close'].iloc[-1]
         
         c1, c2 = st.columns(2)
+        
         with c1:
-            st.subheader("🧱 訂單流結構")
+            st.subheader("🧱 訂單流結構 (Order Flow)")
             if fvg:
-                st.success(f"發現 Bull FVG")
-                st.metric("買入區間", f"${fvg['top']:.2f} - ${fvg['bottom']:.2f}")
+                st.success(f"發現最近的多頭失衡區 (Bull FVG)")
+                st.metric("買入區間頂部", f"${fvg['top']:.2f}")
+                st.metric("買入區間底部", f"${fvg['bottom']:.2f}")
+                dist = (last_close - fvg['top']) / last_close * 100
+                st.caption(f"目前距離買點：{dist:.1f}%")
             else:
-                st.warning("近期無明顯 FVG")
+                st.warning("近期無明顯大型 FVG 結構")
+
         with c2:
-            st.subheader("📐 Fibonacci")
+            st.subheader("📐 黃金回調位 (Fibonacci)")
             st.metric("0.618 回調位", f"${fib:.2f}")
+            st.caption("這是機構演算法最常掛 Limit Buy 的位置")
+            
+            risk = abs(last_close - df['SuperTrend'].iloc[-1])
+            st.metric("建議止損距離 (Risk)", f"${risk:.2f}")
 
 else:
-    st.error("無法取得數據，請確認代號正確或稍後再試")
+    st.error("無法取得數據，請確認代號正確")

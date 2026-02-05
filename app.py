@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 from datetime import timedelta
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="V15 機構獵殺終端", layout="wide", page_icon="🏦")
+st.set_page_config(page_title="V15 機構大市分析終端", layout="wide", page_icon="🏦")
 
 # --- 2. 量化數學引擎 (SMC Math Engine) ---
 # 這些是我們獨家的數學模型，用來計算機構痕跡
